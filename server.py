@@ -12,13 +12,28 @@ DATA_PORT = 2120    # Default FTP data port
 
 
 class FTPServer:
-    def __init__(self, host, port):
+    def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         self.clients = {}
+        self.commands = {
+            "USER": self.handle_user,
+            "PASS": self.handle_pass,
+            "QUIT": self.handle_quit,
+            "LIST": self.handle_list,
+            "PORT": self.handle_port,
+            "RETR": self.handle_retr,
+            "STOR": self.handle_stor,
+            "DELE": self.handle_dele,
+            "MKD": self.handle_mkd,
+            "RMD": self.handle_rmd,
+            "PWD": self.handle_pwd,
+            "CWD": self.handle_cwd,
+            "CDUP": self.handle_cdup,
+        }
         print(f"FTP Server running on {self.host}:{self.port}")
 
     def handle_client(self, client_socket, client_address):
@@ -33,175 +48,53 @@ class FTPServer:
         client_socket.send(b"220 Welcome to FTP Server\r\n")
 
         while True:
-            command = client_socket.recv(1024).decode().strip()
-            if not command:
+            try:
+                command = client_socket.recv(1024).decode().strip()
+                if not command:
+                    break
+                print(f"Command from {client_address}: {command}")
+
+                self.dispatch_command(client_id, command)
+            except Exception as e:
+                print(f"Error handling client {client_address}: {e}")
                 break
-            print(f"Received from {client_address}: {command}")
-
-            client_context = self.clients[client_id]
-
-            if command.upper().startswith('PORT'):
-                try:
-                    parts = command.split(' ')[1].split(',')
-                    ip_address = '.'.join(parts[:4])
-                    port = (int(parts[4]) << 8) + int(parts[5])
-                    if not (0 <= port <= 65535):
-                        raise ValueError("Port out of range")
-                    self.clients[client_id]["data_address"] = (ip_address, port)
-                    client_socket.send(b"200 PORT command successful.\r\n")
-                except Exception as e:
-                    print(f"Error parsing PORT command: {e}")
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-
-            elif command.upper().startswith('USER'):
-                username = command.split(' ')[1] if len(command.split()) > 1 else None
-                if username in USER_DB:
-                    self.clients[client_id]["username"] = username
-                    client_socket.send(b"331 Username OK, need password.\r\n")
-                else:
-                    client_socket.send(b"530 Invalid username.\r\n")
-
-            elif command.upper().startswith('PASS'):
-                if not client_context["username"]:
-                    client_socket.send(b"503 Bad sequence of commands.\r\n")
-                    continue
-
-                password = command.split(' ')[1] if len(command.split()) > 1 else None
-                if USER_DB.get(client_context["username"]) == password:
-                    self.clients[client_id]["authenticated"] = True
-                    client_socket.send(b"230 User logged in.\r\n")
-                else:
-                    client_socket.send(b"530 Invalid password.\r\n")
-
-            elif command.upper().startswith('LIST'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                if not client_context["data_address"]:
-                    client_socket.send(b"425 Use PORT or PASV first.\r\n")
-                    continue
-
-                client_socket.send(b"150 Here comes the directory listing.\r\n")
-                directory_path = command.split(' ')[1] if len(command.split()) > 1 else '.'
-
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-                    data_socket.connect(client_context["data_address"])
-                    self.list_files(data_socket, directory_path)
-
-                client_socket.send(b"226 Directory send ok.\r\n")
-
-            elif command.upper().startswith('RETR'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                if not client_context["data_address"]:
-                    client_socket.send(b"425 Use PORT or PASV first.\r\n")
-                    continue
-
-                filepath = command.split(' ')[1]
-                client_socket.send(b"150 Opening data connection for file transfer.\r\n")
-
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-                    data_socket.connect(client_context["data_address"])
-                    if self.send_file(data_socket, filepath):
-                        client_socket.send(b"226 Transfer complete.\r\n")
-                    else:
-                        client_socket.send(b"550 File not found.\r\n")
-
-            elif command.upper().startswith('STOR'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                if not client_context["data_address"]:
-                    client_socket.send(b"425 Use PORT or PASV first.\r\n")
-                    continue
-
-                filepath = command.split(' ', 1)[1] if len(command.split()) > 1 else None
-                if not filepath:
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-                    continue
-
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_connection:
-                    data_connection.connect(client_context["data_address"])
-                    self.store_file(client_socket, filepath, data_connection)
-
-            elif command.upper().startswith('DELE'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                filepath = command.split(' ', 1)[1] if len(command.split()) > 1 else None
-                if not filepath:
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-                    continue
-
-                self.delete_file(client_socket, filepath)
-
-            elif command.upper().startswith('MKD'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                directory_path = command.split(' ', 1)[1] if len(command.split()) > 1 else None
-                if not directory_path:
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-                    continue
-
-                self.make_directory(client_socket, directory_path)
-
-            elif command.upper().startswith('RMD'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                directory_path = command.split(' ', 1)[1] if len(command.split()) > 1 else None
-                if directory_path:
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-                    continue
-
-                self.remove_directory(client_socket, directory_path)
-
-            elif command.upper() == 'PWD':
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                self.get_current_directory(client_socket)
-
-            elif command.upper().startswith('CWD'):
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                directory_path = command.split(' ', 1)[1] if len(command.split()) > 1 else None
-                if not directory_path:
-                    client_socket.send(b"501 Syntax error in parameters or arguments.\r\n")
-                    continue
-
-                self.change_directory(client_socket, directory_path)
-
-            elif command.upper() == 'CDUP':
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                    continue
-
-                self.change_to_parent_directory(client_socket)
-
-            elif command.upper() == 'QUIT':
-                client_socket.send(b"221 Goodbye.\r\n")
-                break
-
-            else:
-                if not client_context["authenticated"]:
-                    client_socket.send(b"530 Not logged in.\r\n")
-                else:
-                    client_socket.send(b"502 Command not implemented.\r\n")
 
         del self.clients[client_id]
         client_socket.close()
+
+    def dispatch_command(self, client_id, command):
+        """
+        Maps commands to handler functions dynamically.
+        """
+        client_context = self.clients[client_id]
+        client_socket = client_context["socket"]
+
+        command_parts = command.split(' ', 1)
+        cmd = command_parts[0].upper()
+        arg = command_parts[1] if len(command_parts) > 1 else None
+
+        if cmd not in self.commands:
+            self.send_message(client_socket, "502 Command not implemented")
+            return
+
+        if not client_context["authenticated"] and cmd not in ["USER", "PASS", "QUIT"]:
+            self.send_message(client_socket, "530 Not logged in")
+            return
+
+        if cmd in ["LIST", "RETR", "STOR"] and not client_context["data_address"]:
+            self.send_message(client_socket, "425 Use PORT or PASV first.")
+            return
+
+        if not arg and cmd in ["RETR", "STOR", "DELE", "MKD", "RMD", "CWD"]:
+            self.send_message(client_socket, "501 Syntax error in parameters or arguments.")
+            return
+
+        handler = self.commands.get(cmd)
+        handler(client_id, arg)
+
+    @staticmethod
+    def send_message(sock: socket.socket, message: str) -> None:
+        sock.send(f"{message}\r\n".encode())
 
     @staticmethod
     def secure_path(filepath: str) -> str:
@@ -232,20 +125,55 @@ class FTPServer:
 
         return str(size) + suffixes[-1]
 
-    def list_files(self, data_socket: socket.socket, directory_path: str = "./server_storage") -> None:
-        """
-        Sends a detailed list of files in the specified directory to the data socket.
+    def handle_user(self, client_id: str, username: str) -> None:
+        if username in USER_DB:
+            self.clients[client_id]["username"] = username
+            self.send_message(self.clients[client_id]["socket"], "331 Username OK, need password")
+        else:
+            self.send_message(self.clients[client_id]["socket"], "530 Invalid username")
 
-        Args:
-            data_socket (socket): The data socket used for sending the directory listing.
-            directory_path (str): Path of the directory to list. Defaults to the current directory.
-        """
+    def handle_pass(self, client_id: str, password: str):
+        client_socket = self.clients[client_id]["socket"]
+
+        if not self.clients[client_id]["username"]:
+            self.send_message(client_socket, "503 Bad sequence of commands")
+            return
+
+        if USER_DB.get(self.clients[client_id]["username"]) == password:
+            self.clients[client_id]["authenticated"] = True
+            self.send_message(client_socket, "230 User logged in")
+        else:
+            self.send_message(client_socket, "530 Invalid password")
+
+    def handle_quit(self, client_id: str, _: str) -> None:
+        self.send_message(self.clients[client_id]["socket"], "221 Goodbye")
+        self.clients[client_id]["socket"].close()
+
+    def handle_port(self, client_id: str, arg: str) -> None:
         try:
-            if not os.path.isdir(directory_path):
-                data_socket.send(b"550 Not a valid directory.\r\n")
+            parts = arg.split(',')
+            ip_address = '.'.join(parts[:4])
+            port = (int(parts[4]) << 8) + int(parts[5])
+            if not (0 <= port <= 65535):
+                raise ValueError("Port out of range")
+            self.clients[client_id]["data_address"] = (ip_address, port)
+            self.send_message(self.clients[client_id]["socket"], "200 PORT command successful.")
+        except Exception as e:
+            print(f"Error parsing PORT command: {e}")
+            self.send_message(self.clients[client_id]["socket"], "501 Syntax error in parameters or arguments.")
+
+    def handle_list(self, client_id: str, directory_path: str) -> None:
+        client_context = self.clients[client_id]
+        client_socket = client_context["socket"]
+        directory_path = directory_path or "."
+
+        try:
+            safe_path = self.secure_path(directory_path)
+
+            if not os.path.isdir(safe_path):
+                self.send_message(client_socket, "550 Not a valid directory.")
                 return
 
-            safe_path = self.secure_path(directory_path)
             files = os.listdir(safe_path)
             response_lines = []
 
@@ -263,144 +191,153 @@ class FTPServer:
                 response_lines.append(f"{file_type.ljust(5)} {size.ljust(7)} {modified_date}   {file}")
 
             response = "\r\n".join(response_lines) + "\r\n"
-            data_socket.send(response.encode())
+            self.send_message(client_socket, "150 Here comes the directory listing")
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
+                data_socket.connect(client_context["data_address"])
+                data_socket.send(response.encode())
+
+            self.send_message(client_socket, "226 Directory send ok")
         except PermissionError:
-            data_socket.send(b"550 Permission denied.\r\n")
+            self.send_message(client_socket, "550 Permission denied.")
         except Exception as e:
-            data_socket.send(f"450 Error listing directory: {str(e)}\r\n".encode())
+            print(f"Error listing directory {directory_path}: {e}")
+            self.send_message(client_socket, "450 Failed to list directory")
 
-    def send_file(self, data_socket: socket.socket, filepath: str) -> bool:
+    def handle_retr(self, client_id: str, filepath: str):
+        client_context = self.clients[client_id]
+        client_socket = client_context["socket"]
+
         try:
+            if not os.path.isfile(filepath):
+                self.send_message(client_socket, "550 Not a valid file.")
+
             safe_path = self.secure_path(filepath)
+            self.send_message(client_socket, "150 Opening data connection for file transfer")
 
-            if not os.path.isfile(safe_path):
-                return False
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
+                data_socket.connect(client_context["data_address"])
+                with open(safe_path, 'rb') as f:
+                    while chunk := f.read(1024):
+                        data_socket.send(chunk)
 
-            with open(filepath, 'rb') as f:
-                while True:
-                    data = f.read(1024)
-                    if not data:
-                        break
-                    data_socket.send(data)
+            self.send_message(client_socket, "226 Transfer complete")
+        except PermissionError:
+            self.send_message(client_socket, "550 Permission denied.")
+        except Exception as e:
+            print(f"Error retrieving file {filepath}: {e}")
+            self.send_message(client_socket, "450 Failed to retrieve file")
 
-            return True
+    def handle_stor(self, client_id: str, filepath: str):
+        client_context = self.clients[client_id]
+        client_socket = client_context["socket"]
 
-        except RuntimeError:
-            return False
-        finally:
-            data_socket.close()
-
-    def store_file(self, client_socket: socket.socket, filepath: str, data_connection: socket.socket) -> None:
-        """
-        Stores a file uploaded by the client to the server, ensuring the path is secure.
-        """
         try:
             safe_path = self.secure_path(filepath)
             os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+            self.send_message(client_socket, "150 Ready to receive file")
 
-            with open(safe_path, 'wb') as file:
-                client_socket.send(b"150 Ready to receive file.\r\n")
-                while data := data_connection.recv(1024):
-                    file.write(data)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
+                data_socket.connect(client_context["data_address"])
+                with open(safe_path, 'wb') as file:
+                    while data := data_socket.recv(1024):
+                        file.write(data)
 
-            client_socket.send(b"226 File transfer complete.\r\n")
+            self.send_message(client_socket, "226 File transfer complete")
         except PermissionError:
-            client_socket.send(b"550 Permission denied.\r\n")
+            self.send_message(client_socket, "550 Permission denied.")
         except Exception as e:
-            print(f"Error storing file: {e}")
-            client_socket.send(b"450 Failed to store file.\r\n")
-        finally:
-            data_connection.close()
+            print(f"Error storing file {filepath}: {e}")
+            self.send_message(client_socket, "450 Failed to store file")
 
-    def delete_file(self, client_socket: socket.socket, filepath: str) -> None:
-        """
-        Deletes a file on the server.
-        """
+    def handle_dele(self, client_id, filepath):
+        client_context = self.clients[client_id]
+        client_socket = client_context["socket"]
+
         try:
+            if not os.path.isfile(filepath):
+                self.send_message(client_socket, "550 File not found or is not a file")
+                return
+
             safe_path = self.secure_path(filepath)
-            if os.path.isfile(safe_path):
-                os.remove(safe_path)
-                client_socket.send(b"250 File deleted successfully.\r\n")
-            else:
-                client_socket.send(b"550 File not found or is not a file.\r\n")
-        except PermissionError:
-            client_socket.send(b"550 Permission denied.\r\n")
-        except Exception as e:
-            print(f"Error deleting file: {e}")
-            client_socket.send(b"450 File deletion failed.\r\n")
+            os.remove(safe_path)
+            self.send_message(client_socket, "250 File deleted successfully")
 
-    @staticmethod
-    def make_directory(client_socket: socket.socket, directory_path: str) -> None:
-        """
-        Creates a new directory on the server.
-        """
+        except PermissionError:
+            self.send_message(client_socket, "550 Permission denied.")
+        except Exception as e:
+            print(f"Error deleting file {filepath}: {e}")
+            self.send_message(client_socket, "450 File deletion failed")
+
+    def handle_mkd(self, client_id: str, directory_path: str):
+        client_socket = self.clients[client_id]["socket"]
+
         try:
-            os.makedirs(directory_path, exist_ok=True)
-            client_socket.send(b"257 Directory created successfully.\r\n")
+            safe_path = self.secure_path(directory_path)
+            os.makedirs(safe_path, exist_ok=True)
+            self.send_message(client_socket, "257 Directory created successfully.")
+        except PermissionError:
+            self.send_message(client_socket, "550 Permission denied.")
         except Exception as e:
             print(f"Error creating directory: {e}")
-            client_socket.send(b"550 Directory creation failed.\r\n")
+            self.send_message(client_socket, "550 Directory creation failed.")
 
-    def remove_directory(self, client_socket: socket.socket, directory_path: str) -> None:
-        """
-        Removes a directory on the server.
-        """
+    def handle_rmd(self, client_id, directory_path):
+        client_socket = self.clients[client_id]["socket"]
+
         try:
             safe_path = self.secure_path(directory_path)
             if os.path.isdir(safe_path):
-                shutil.rmtree(directory_path)
-                client_socket.send(b"250 Directory removed successfully.\r\n")
+                shutil.rmtree(safe_path)
+                self.send_message(client_socket, f"250 Directory '{directory_path}' removed successfully")
             else:
-                client_socket.send(b"550 Directory not found or is not a directory.\r\n")
+                self.send_message(client_socket, "550 Directory not found or is not a directory")
         except PermissionError:
-            client_socket.send(b"550 Permission denied.\r\n")
+            self.send_message(client_socket, "550 Permission denied.")
         except Exception as e:
-            print(f"Error removing directory: {e}")
-            client_socket.send(b"450 Directory removal failed. Make sure it is empty.\r\n")
+            print(f"Error removing directory {directory_path}: {e}")
+            self.send_message(client_socket, "450 Directory removal failed")
 
-    @staticmethod
-    def get_current_directory(client_socket: socket.socket) -> None:
-        """
-        Sends the current working directory to the client.
-        """
+    def handle_pwd(self, client_id, _):
+        client_socket = self.clients[client_id]["socket"]
+
         try:
             current_directory = os.getcwd()
-            client_socket.send(f'257 "{current_directory}" is the current directory.\r\n'.encode())
+            self.send_message(client_socket, f'257 "{current_directory}" is the current directory')
         except Exception as e:
             print(f"Error getting current directory: {e}")
-            client_socket.send(b"450 Failed to retrieve current directory.\r\n")
+            self.send_message(client_socket, "450 Failed to retrieve current directory")
 
-    def change_directory(self, client_socket: socket.socket, directory_path: str) -> None:
-        """
-        Changes the working directory to the specified path.
-        """
+    def handle_cwd(self, client_id, directory_path):
+        client_socket = self.clients[client_id]["socket"]
+
         try:
             safe_path = self.secure_path(directory_path)
             os.chdir(safe_path)
             current_directory = os.getcwd()
-            client_socket.send(f'250 Directory successfully changed to "{current_directory}".\r\n'.encode())
-        except FileNotFoundError:
-            client_socket.send(b"550 Directory not found.\r\n")
-        except NotADirectoryError:
-            client_socket.send(b"550 Not a directory.\r\n")
-        except PermissionError:
-            client_socket.send(b"550 Permission denied.\r\n")
-        except Exception as e:
-            print(f"Error changing directory: {e}")
-            client_socket.send(b"450 Failed to change directory.\r\n")
+            self.send_message(client_socket, f'250 Directory successfully changed to "{current_directory}"')
 
-    @staticmethod
-    def change_to_parent_directory(client_socket: socket.socket) -> None:
-        """
-        Changes the working directory to the parent directory.
-        """
+        except FileNotFoundError:
+            self.send_message(client_socket, "550 Directory not found")
+        except NotADirectoryError:
+            self.send_message(client_socket, "550 Not a directory")
+        except PermissionError:
+            self.send_message(client_socket, "550 Permission denied")
+        except Exception as e:
+            print(f"Error changing directory {directory_path}: {e}")
+            self.send_message(client_socket, "450 Failed to change directory")
+
+    def handle_cdup(self, client_id, _):
+        client_socket = self.clients[client_id]["socket"]
+
         try:
             os.chdir('..')
             current_directory = os.getcwd()
-            client_socket.send(f'200 Moved to parent directory. Current directory: "{current_directory}".\r\n'.encode())
+            self.send_message(client_socket,
+                               f'200 Moved to parent directory. Current directory: "{current_directory}"')
         except Exception as e:
             print(f"Error moving to parent directory: {e}")
-            client_socket.send(b"450 Failed to move to parent directory.\r\n")
+            self.send_message(client_socket, "450 Failed to move to parent directory")
 
     def run(self) -> None:
         while True:
