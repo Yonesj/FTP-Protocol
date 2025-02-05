@@ -1,18 +1,27 @@
+import shlex
 import socket
 import os
 import sys
+import ssl
 
 
-class FTPClient:
-    def __init__(self, host: str, port: int, data_port: int = 0) -> None:
+class FTPSClient:
+    def __init__(self, host: str, port: int, data_port: int = 0, certfile: str = "server.crt") -> None:
         self.host = host
         self.port = port
         self.data_port = data_port
-        self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        self.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        self.ssl_context.load_verify_locations(certfile)
+        self.ssl_context.check_hostname = False
+        self.ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+        self.control_socket = None
         self.data_socket = None
 
     def connect(self) -> str:
-        self.control_socket.connect((self.host, self.port))
+        raw_socket = socket.create_connection((self.host, self.port))
+        self.control_socket = self.ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
         return self.control_socket.recv(1024).decode()
 
     def send_command(self, command: str) -> str:
@@ -20,21 +29,30 @@ class FTPClient:
         return self.control_socket.recv(1024).decode("ascii")
 
     def setup_data_connection(self) -> None:
-        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.data_socket.bind(('', 0))
-        self.data_socket.listen(1)
-        assigned_port = self.data_socket.getsockname()[1]
+        raw_data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_data_socket.bind(('', 0))
+        raw_data_socket.listen(1)
+        assigned_port = raw_data_socket.getsockname()[1]
         local_ip = socket.gethostbyname(socket.gethostname())
+
         self.send_command(f"PORT {local_ip.replace('.', ',')},{assigned_port >> 8},{assigned_port & 0xFF}")
+        self.data_socket = raw_data_socket
+
+    def accept_data_connection(self) -> ssl.SSLSocket:
+        """
+        Accepts an incoming data connection and wraps it in SSL.
+        """
+        raw_conn, _ = self.data_socket.accept()
+        return self.ssl_context.wrap_socket(raw_conn, server_side=False)
 
     def list_files(self, command: str) -> str:
         self.setup_data_connection()
         result = self.send_command(command)
 
-        if result.startswith("530") or result.startswith("425"):
-            return
+        if not result.startswith("150"):
+            return result
 
-        data_conn, _ = self.data_socket.accept()
+        data_conn = self.accept_data_connection()
         result_messages = [result, data_conn.recv(1024).decode(), self.control_socket.recv(1024).decode()]
 
         data_conn.close()
@@ -50,7 +68,7 @@ class FTPClient:
             return
 
         os.makedirs("Downloads", exist_ok=True)
-        data_conn, _ = self.data_socket.accept()
+        data_conn = self.accept_data_connection()
 
         try:
             with open(f"Downloads/{os.path.basename(filepath)}", 'wb') as f:
@@ -83,7 +101,7 @@ class FTPClient:
         if not result.startswith("150"):
             return
 
-        data_conn, _ = self.data_socket.accept()
+        data_conn = self.accept_data_connection()
 
         try:
             with open(local_filepath, 'rb') as f:
@@ -111,7 +129,7 @@ def main():
         print("Please provide server IP address")
         return
 
-    client = FTPClient(server_ip_adr, 2020)
+    client = FTPSClient(server_ip_adr, 2020)
     print(client.connect())
 
     while True:
@@ -133,7 +151,7 @@ def main():
 
         elif command == "STOR":
             try:
-                args = input_.split(' ', 2)[1:]
+                args = shlex.split(input_)[1:]
                 if len(args) != 2:
                     raise ValueError
                 local_filepath, server_filepath = args
