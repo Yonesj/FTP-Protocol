@@ -2,6 +2,7 @@ import socket
 import threading
 import os
 import shutil
+import ssl
 from datetime import datetime
 
 from db_manager import USER_DB
@@ -15,7 +16,13 @@ class FTPServer:
     def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
+
+        self.ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        self.ssl_context.load_cert_chain(certfile="server.crt", keyfile="server.key")
+
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket = self.ssl_context.wrap_socket(self.server_socket, server_side=True)
+
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         self.clients = {}
@@ -34,9 +41,16 @@ class FTPServer:
             "CWD": self.handle_cwd,
             "CDUP": self.handle_cdup,
         }
-        print(f"FTP Server running on {self.host}:{self.port}")
+        print(f"FTPS Server running on {self.host}:{self.port} with SSL/TLS")
 
     def handle_client(self, client_socket, client_address):
+        try:
+            client_socket.do_handshake()
+            print(f"SSL handshake completed with {client_address}")
+        except ssl.SSLError as e:
+            print(f"SSL handshake failed with {client_address}: {e}")
+            return
+
         client_id = client_address
         self.clients[client_id] = {
             "socket": client_socket,
@@ -45,7 +59,7 @@ class FTPServer:
             "username": None,
         }
 
-        client_socket.send(b"220 Welcome to FTP Server\r\n")
+        client_socket.send(b"220 Welcome to FTPS Server\r\n")
 
         while True:
             try:
@@ -162,6 +176,20 @@ class FTPServer:
             print(f"Error parsing PORT command: {e}")
             self.send_message(self.clients[client_id]["socket"], "501 Syntax error in parameters or arguments.")
 
+    def accept_data_connection(self, client_id: str) -> ssl.SSLSocket:
+        """
+        Accepts an incoming data connection from the client and wraps it in SSL.
+        """
+        data_address = self.clients[client_id]["data_address"]
+
+        if not data_address:
+            raise ValueError("Data connection address not set. Use PORT or PASV first.")
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw_socket:
+            raw_socket.connect(data_address)
+            ssl_socket = self.ssl_context.wrap_socket(raw_socket, server_side=True)
+            return ssl_socket
+
     def handle_list(self, client_id: str, directory_path: str) -> None:
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
@@ -193,8 +221,7 @@ class FTPServer:
             response = "\r\n".join(response_lines) + "\r\n"
             self.send_message(client_socket, "150 Here comes the directory listing")
 
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-                data_socket.connect(client_context["data_address"])
+            with self.accept_data_connection(client_id) as data_socket:
                 data_socket.send(response.encode())
 
             self.send_message(client_socket, "226 Directory send ok")
@@ -215,8 +242,7 @@ class FTPServer:
             safe_path = self.secure_path(filepath)
             self.send_message(client_socket, "150 Opening data connection for file transfer")
 
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-                data_socket.connect(client_context["data_address"])
+            with self.accept_data_connection(client_id) as data_socket:
                 with open(safe_path, 'rb') as f:
                     while chunk := f.read(1024):
                         data_socket.send(chunk)
@@ -237,8 +263,7 @@ class FTPServer:
             os.makedirs(os.path.dirname(safe_path), exist_ok=True)
             self.send_message(client_socket, "150 Ready to receive file")
 
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-                data_socket.connect(client_context["data_address"])
+            with self.accept_data_connection(client_id) as data_socket:
                 with open(safe_path, 'wb') as file:
                     while data := data_socket.recv(1024):
                         file.write(data)
