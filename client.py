@@ -136,7 +136,7 @@ def main():
         input_ = input("ftp> ").strip()
         command = input_.split(' ', 1)[0].upper()
 
-        if command in ["USER", "PASS", "DELE", "MKD", "RMD", "PWD", "CWD", "CDUP"]:
+        if command in ["USER", "PASS", "DELE", "MKD", "RMD", "PWD", "CWD", "CDUP", "SIGNUP"]:
             print(client.send_command(input_))
 
         elif command == "LIST":
