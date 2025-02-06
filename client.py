@@ -6,10 +6,11 @@ import ssl
 
 
 class FTPSClient:
-    def __init__(self, host: str, port: int, data_port: int = 0, certfile: str = "server.crt") -> None:
+    def __init__(self, host: str, port: int, data_port: int = 0, certfile: str = "server.crt", use_passive_mode: bool = False) -> None:
         self.host = host
         self.port = port
         self.data_port = data_port
+        self.use_passive_mode = use_passive_mode
 
         self.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         self.ssl_context.load_verify_locations(certfile)
@@ -29,6 +30,12 @@ class FTPSClient:
         return self.control_socket.recv(1024).decode("ascii")
 
     def setup_data_connection(self) -> None:
+        if self.use_passive_mode:
+            self.setup_passive_data_connection()
+        else:
+            self.setup_active_data_connection()
+
+    def setup_active_data_connection(self) -> None:
         raw_data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         raw_data_socket.bind(('', 0))
         raw_data_socket.listen(1)
@@ -38,10 +45,32 @@ class FTPSClient:
         self.send_command(f"PORT {local_ip.replace('.', ',')},{assigned_port >> 8},{assigned_port & 0xFF}")
         self.data_socket = raw_data_socket
 
+    def setup_passive_data_connection(self) -> None:
+        """
+        Sends the PASV command to the server and establishes a passive data connection.
+        """
+        response = self.send_command("PASV")
+        if not response.startswith("227"):
+            raise RuntimeError(f"Failed to enter passive mode: {response}")
+
+        start = response.find('(') + 1
+        end = response.find(')')
+        address_info = response[start:end].split(',')
+        ip = '.'.join(address_info[:4])
+        port = (int(address_info[4]) << 8) + int(address_info[5])
+
+        # raw_data_socket = socket.create_connection((ip, port))
+        # self.data_socket = self.ssl_context.wrap_socket(raw_data_socket, server_side=False)  # Wrap in SSL
+        self.data_socket = socket.create_connection((ip, port))
+
     def accept_data_connection(self) -> ssl.SSLSocket:
         """
-        Accepts an incoming data connection and wraps it in SSL.
+        Accepts an incoming data connection and wraps it in SSL for active mode.
+        Does not wrap for passive mode, since it is already done in setup_passive_data_connection.
         """
+        if self.use_passive_mode:
+            return self.data_socket
+
         raw_conn, _ = self.data_socket.accept()
         return self.ssl_context.wrap_socket(raw_conn, server_side=False)
 
@@ -162,6 +191,17 @@ def main():
         elif command == "QUIT":
             print(client.quit())
             break
+
+        elif command == "MODE":
+            mode = input_.split(' ', 1)[1].upper()
+            if mode == "PASV":
+                client.use_passive_mode = True
+                print("Switched to passive mode.")
+            elif mode == "PORT":
+                client.use_passive_mode = False
+                print("Switched to active mode.")
+            else:
+                print("Usage: MODE [PASV|PORT]")
 
         else:
             print(f"502 Command not implemented: {command}")
