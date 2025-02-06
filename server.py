@@ -1,3 +1,4 @@
+import shlex
 import socket
 import threading
 import os
@@ -7,6 +8,7 @@ from datetime import datetime
 
 import config
 from users.user_manager import USER_DB_MANAGER
+from metadata.file_manager import FileDBManager
 
 HOST = '127.0.0.1'  # Localhost
 PORT = 2020         # Default FTP port
@@ -281,16 +283,18 @@ class FTPServer:
     def handle_retr(self, client_id: str, filepath: str):
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
-
-        if not client_context["user"].can_read:
-            self.send_message(client_socket, "550 Permission denied.")
-            return
+        user = client_context["user"]
 
         try:
             if not os.path.isfile(filepath):
                 self.send_message(client_socket, "550 Not a valid file.")
 
             safe_path = self.secure_path(filepath)
+            file_meta = FileDBManager.get_file(safe_path)
+
+            if not (user.is_admin or file_meta is not None or file_meta.is_public or user != file_meta.owner):
+                raise PermissionError()
+
             self.send_message(client_socket, "150 Opening data connection for file transfer")
 
             with self.accept_data_connection(client_id) as data_socket:
@@ -305,16 +309,26 @@ class FTPServer:
             print(f"Error retrieving file {filepath}: {e}")
             self.send_message(client_socket, "450 Failed to retrieve file")
 
-    def handle_stor(self, client_id: str, filepath: str):
+    def handle_stor(self, client_id: str, args: str):
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
-
-        if not client_context["user"].can_write:
-            self.send_message(client_socket, "550 Permission denied.")
-            return
+        user = client_context["user"]
 
         try:
+            parts = shlex.split(args)
+
+            if len(parts) != 2:
+                raise ValueError("Invalid arguments. Usage: STOR <filepath> <public/private>")
+
+            filepath, is_pub_str = parts
+            is_public = "public" in is_pub_str
             safe_path = self.secure_path(filepath)
+            file_meta = FileDBManager.get_file(safe_path)
+
+            if file_meta:
+                if not (user.is_admin or user == file_meta.owner):
+                    raise PermissionError("You do not have permission to overwrite this file.")
+
             os.makedirs(os.path.dirname(safe_path), exist_ok=True)
             self.send_message(client_socket, "150 Ready to receive file")
 
@@ -324,19 +338,24 @@ class FTPServer:
                         file.write(data)
 
             self.send_message(client_socket, "226 File transfer complete")
-        except PermissionError:
-            self.send_message(client_socket, "550 Permission denied.")
+
+            if file_meta:
+                file_meta.is_public = is_public
+                file_meta.save()
+            else:
+                FileDBManager.create_file(os.path.basename(safe_path), safe_path, user, is_public)
+        except PermissionError as e:
+            self.send_message(client_socket, f"550 Permission denied: {e}")
+        except ValueError as e:
+            self.send_message(client_socket, f"501 Syntax error in parameters or arguments: {e}")
         except Exception as e:
-            print(f"Error storing file {filepath}: {e}")
+            print(f"Error storing file {args}: {e}")
             self.send_message(client_socket, "450 Failed to store file")
 
     def handle_dele(self, client_id, filepath):
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
-
-        if not client_context["user"].can_delete:
-            self.send_message(client_socket, "550 Permission denied.")
-            return
+        user = client_context["user"]
 
         try:
             if not os.path.isfile(filepath):
@@ -344,8 +363,14 @@ class FTPServer:
                 return
 
             safe_path = self.secure_path(filepath)
+            file_meta = FileDBManager.get_file(safe_path)
+
+            if not user.is_admin and file_meta is not None and user != file_meta.owner:
+                raise PermissionError()
+
             os.remove(safe_path)
             self.send_message(client_socket, "250 File deleted successfully")
+            FileDBManager.delete_file(file_meta)
 
         except PermissionError:
             self.send_message(client_socket, "550 Permission denied.")
@@ -355,10 +380,6 @@ class FTPServer:
 
     def handle_mkd(self, client_id: str, directory_path: str):
         client_socket = self.clients[client_id]["socket"]
-
-        if not self.clients[client_id]["user"].can_create:
-            self.send_message(client_socket, "550 Permission denied.")
-            return
 
         try:
             safe_path = self.secure_path(directory_path)
@@ -373,7 +394,7 @@ class FTPServer:
     def handle_rmd(self, client_id, directory_path):
         client_socket = self.clients[client_id]["socket"]
 
-        if not self.clients[client_id]["user"].can_delete:
+        if not self.clients[client_id]["user"].is_admin:
             self.send_message(client_socket, "550 Permission denied.")
             return
 
