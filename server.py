@@ -260,6 +260,10 @@ class FTPServer:
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
 
+        if not client_context["user"].can_read:
+            self.send_message(client_socket, "550 Permission denied.")
+            return
+
         try:
             if not os.path.isfile(filepath):
                 self.send_message(client_socket, "550 Not a valid file.")
@@ -283,6 +287,10 @@ class FTPServer:
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
 
+        if not client_context["user"].can_write:
+            self.send_message(client_socket, "550 Permission denied.")
+            return
+
         try:
             safe_path = self.secure_path(filepath)
             os.makedirs(os.path.dirname(safe_path), exist_ok=True)
@@ -304,6 +312,10 @@ class FTPServer:
         client_context = self.clients[client_id]
         client_socket = client_context["socket"]
 
+        if not client_context["user"].can_delete:
+            self.send_message(client_socket, "550 Permission denied.")
+            return
+
         try:
             if not os.path.isfile(filepath):
                 self.send_message(client_socket, "550 File not found or is not a file")
@@ -322,6 +334,10 @@ class FTPServer:
     def handle_mkd(self, client_id: str, directory_path: str):
         client_socket = self.clients[client_id]["socket"]
 
+        if not self.clients[client_id]["user"].can_create:
+            self.send_message(client_socket, "550 Permission denied.")
+            return
+
         try:
             safe_path = self.secure_path(directory_path)
             os.makedirs(safe_path, exist_ok=True)
@@ -334,6 +350,10 @@ class FTPServer:
 
     def handle_rmd(self, client_id, directory_path):
         client_socket = self.clients[client_id]["socket"]
+
+        if not self.clients[client_id]["user"].can_delete:
+            self.send_message(client_socket, "550 Permission denied.")
+            return
 
         try:
             safe_path = self.secure_path(directory_path)
