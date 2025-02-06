@@ -113,7 +113,7 @@ class FTPSClient:
             data_conn.close()
             self.data_socket.close()
 
-    def store_file(self, local_filepath: str, server_filepath: str) -> None:
+    def store_file(self, local_filepath: str, server_filepath: str, visibility: str) -> None:
         if not os.path.isfile(local_filepath):
             print(f"Error: File not found: {local_filepath}")
             return
@@ -124,7 +124,7 @@ class FTPSClient:
             server_filepath += '/'
 
         server_filepath = os.path.join(server_filepath, os.path.basename(local_filepath)).replace("\\", "/")
-        result = self.send_command(f"STOR {server_filepath}")
+        result = self.send_command(f'STOR "{server_filepath}" "{visibility}"')
         print(result)
 
         if not result.startswith("150"):
@@ -152,8 +152,8 @@ class FTPSClient:
 
 def main():
     try:
-        # server_ip_adr = sys.argv[1]
-        server_ip_adr = "127.0.0.1"  #for debugging purpose
+        server_ip_adr = sys.argv[1]
+        # server_ip_adr = "127.0.0.1"  #for debugging purpose
     except IndexError:
         print("Please provide server IP address")
         return
@@ -181,12 +181,14 @@ def main():
         elif command == "STOR":
             try:
                 args = shlex.split(input_)[1:]
-                if len(args) != 2:
+
+                if len(args) != 3:
                     raise ValueError
-                local_filepath, server_filepath = args
-                client.store_file(local_filepath, server_filepath)
+
+                local_filepath, server_filepath, is_public = args
+                client.store_file(local_filepath, server_filepath, is_public)
             except ValueError:
-                print("Usage: STOR <local_filepath> <server_filepath>")
+                print("Usage: STOR <local_filepath> <server_filepath> <visibility>")
 
         elif command == "QUIT":
             print(client.quit())
