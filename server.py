@@ -5,7 +5,8 @@ import shutil
 import ssl
 from datetime import datetime
 
-from db_manager import USER_DB
+import config
+from users.user_manager import USER_DB_MANAGER
 
 HOST = '127.0.0.1'  # Localhost
 PORT = 2020         # Default FTP port
@@ -29,6 +30,7 @@ class FTPServer:
         self.commands = {
             "USER": self.handle_user,
             "PASS": self.handle_pass,
+            "SIGNUP": self.handle_signup,
             "QUIT": self.handle_quit,
             "LIST": self.handle_list,
             "PORT": self.handle_port,
@@ -56,7 +58,7 @@ class FTPServer:
             "socket": client_socket,
             "data_address": None,
             "authenticated": False,
-            "username": None,
+            "user": None,
         }
 
         client_socket.send(b"220 Welcome to FTPS Server\r\n")
@@ -91,7 +93,7 @@ class FTPServer:
             self.send_message(client_socket, "502 Command not implemented")
             return
 
-        if not client_context["authenticated"] and cmd not in ["USER", "PASS", "QUIT"]:
+        if not client_context["authenticated"] and cmd not in ["USER", "PASS", "SIGNUP", "QUIT"]:
             self.send_message(client_socket, "530 Not logged in")
             return
 
@@ -99,7 +101,7 @@ class FTPServer:
             self.send_message(client_socket, "425 Use PORT or PASV first.")
             return
 
-        if not arg and cmd in ["RETR", "STOR", "DELE", "MKD", "RMD", "CWD"]:
+        if not arg and cmd in ["RETR", "STOR", "DELE", "MKD", "RMD", "CWD", "PORT", "SIGNUP"]:
             self.send_message(client_socket, "501 Syntax error in parameters or arguments.")
             return
 
@@ -140,24 +142,47 @@ class FTPServer:
         return str(size) + suffixes[-1]
 
     def handle_user(self, client_id: str, username: str) -> None:
-        if username in USER_DB:
-            self.clients[client_id]["username"] = username
+        user = USER_DB_MANAGER.get_user(username)
+
+        if user:
+            self.clients[client_id]["user"] = user
             self.send_message(self.clients[client_id]["socket"], "331 Username OK, need password")
         else:
             self.send_message(self.clients[client_id]["socket"], "530 Invalid username")
 
     def handle_pass(self, client_id: str, password: str):
         client_socket = self.clients[client_id]["socket"]
+        user = self.clients[client_id]["user"]
 
-        if not self.clients[client_id]["username"]:
+        if not user:
             self.send_message(client_socket, "503 Bad sequence of commands")
             return
 
-        if USER_DB.get(self.clients[client_id]["username"]) == password:
+        if user.password == password:
             self.clients[client_id]["authenticated"] = True
             self.send_message(client_socket, "230 User logged in")
         else:
             self.send_message(client_socket, "530 Invalid password")
+
+    def handle_signup(self, client_id: str, arg: str):
+        control_socket = self.clients[client_id]["socket"]
+
+        try:
+            username, password = arg.split(' ')
+        except Exception as e:
+            print(f"Error parsing SIGNUP command: {e}")
+            self.send_message(control_socket, "501 Syntax error in parameters or arguments.")
+            return
+
+        new_user = USER_DB_MANAGER.create_user(username, password)
+
+        if new_user:
+            self.clients[client_id]["user"] = new_user
+            self.clients[client_id]["authenticated"] = True
+            self.send_message(control_socket, "User created successfully")
+            return
+
+        self.send_message(control_socket, "Username already exists")
 
     def handle_quit(self, client_id: str, _: str) -> None:
         self.send_message(self.clients[client_id]["socket"], "221 Goodbye")
