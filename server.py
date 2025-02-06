@@ -34,6 +34,7 @@ class FTPServer:
             "QUIT": self.handle_quit,
             "LIST": self.handle_list,
             "PORT": self.handle_port,
+            "PASV": self.handle_pasv,
             "RETR": self.handle_retr,
             "STOR": self.handle_stor,
             "DELE": self.handle_dele,
@@ -200,6 +201,27 @@ class FTPServer:
         except Exception as e:
             print(f"Error parsing PORT command: {e}")
             self.send_message(self.clients[client_id]["socket"], "501 Syntax error in parameters or arguments.")
+
+    def handle_pasv(self, client_id: str, _):
+        """
+        Handles the PASV command by entering passive mode.
+        Dynamically binds a new socket for data connections, informs the client, and accepts the connection.
+        """
+        client_socket = self.clients[client_id]["socket"]
+
+        passive_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        passive_socket.bind((self.host, 0))  # Bind to any available port
+        passive_socket.listen(1)
+
+        ip, port = passive_socket.getsockname()
+        ip_parts = ip.split('.')
+        port_high, port_low = port >> 8, port & 0xFF
+
+        self.send_message(client_socket, f"227 Entering Passive Mode ({','.join(ip_parts)},{port_high},{port_low})")
+        raw_data_socket, client_address = passive_socket.accept()
+
+        self.clients[client_id]["data_address"] = client_address
+        passive_socket.close()
 
     def accept_data_connection(self, client_id: str) -> ssl.SSLSocket:
         """
